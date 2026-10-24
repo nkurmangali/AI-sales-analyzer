@@ -6,6 +6,37 @@ import type { Feedback } from "@/lib/analyze";
 
 type Mode = "audio" | "text";
 
+const EXTENSIONS: Record<string, string> = {
+  "audio/mp4": "m4a",
+  "audio/mpeg": "mp3",
+  "audio/wav": "wav",
+  "audio/ogg": "ogg",
+  "audio/webm": "webm",
+  "audio/flac": "flac",
+  "audio/amr": "amr",
+};
+
+// Определяет формат по первым байтам файла — у записей с диктофона часто нет расширения в имени.
+async function detectAudioType(file: File): Promise<string | null> {
+  if (file.type.startsWith("audio/") || file.type.startsWith("video/")) return file.type;
+  const b = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+  const ascii = (from: number, to: number) => String.fromCharCode(...b.slice(from, to));
+  if (ascii(4, 8) === "ftyp") return "audio/mp4";
+  if (ascii(0, 3) === "ID3" || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0)) return "audio/mpeg";
+  if (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WAVE") return "audio/wav";
+  if (ascii(0, 4) === "OggS") return "audio/ogg";
+  if (ascii(0, 4) === "fLaC") return "audio/flac";
+  if (ascii(0, 5) === "#!AMR") return "audio/amr";
+  if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return "audio/webm";
+  return null;
+}
+
+function uploadName(file: File, type: string): string {
+  const safe = file.name.replace(/[^\p{L}\p{N}._-]+/gu, "_") || "call";
+  if (/\.(m4a|mp3|wav|ogg|oga|opus|webm|flac|amr|aac|mp4|mov|mkv)$/i.test(safe)) return safe;
+  return `${safe}.${EXTENSIONS[type] ?? type.split("/")[1]}`;
+}
+
 function parseTimecode(tc: string): number | null {
   const parts = tc.trim().split(":").map(Number);
   if (parts.length < 2 || parts.some((n) => Number.isNaN(n))) return null;
@@ -27,10 +58,13 @@ export default function Home() {
 
   const busy = status !== null;
 
-  function onFileChange(f: File | null) {
+  async function onFileChange(f: File | null) {
     setFile(f);
     if (audioSrc) URL.revokeObjectURL(audioSrc);
-    setAudioSrc(f ? URL.createObjectURL(f) : null);
+    if (!f) return setAudioSrc(null);
+    // Без указанного типа браузер может не воспроизвести файл без расширения.
+    const type = (await detectAudioType(f)) ?? f.type;
+    setAudioSrc(URL.createObjectURL(type ? new Blob([f], { type }) : f));
   }
 
   async function run() {
@@ -41,9 +75,12 @@ export default function Home() {
       let audioUrl: string | undefined;
       if (mode === "audio") {
         if (!file) throw new Error("Выберите файл записи");
+        const contentType = await detectAudioType(file);
+        if (!contentType) throw new Error("Не удалось распознать формат файла. Нужна аудио- или видеозапись.");
         setStatus("Загружаю запись…");
-        const blob = await upload(`calls/${file.name}`, file, {
+        const blob = await upload(`calls/${uploadName(file, contentType)}`, file, {
           access: "public",
+          contentType,
           handleUploadUrl: "/api/upload",
           multipart: file.size > 50 * 1024 * 1024,
         });
@@ -117,9 +154,9 @@ export default function Home() {
         {mode === "audio" ? (
           <>
             <label>
-              Аудио или видео <span className="hint">mp3, m4a, wav, ogg, mp4, webm — до 500 МБ</span>
+              Аудио или видео <span className="hint">mp3, m4a, wav, ogg, mp4, webm, записи диктофона — до 500 МБ</span>
             </label>
-            <input type="file" accept="audio/*,video/*" onChange={(e) => onFileChange(e.target.files?.[0] ?? null)} />
+            <input type="file" onChange={(e) => onFileChange(e.target.files?.[0] ?? null)} />
           </>
         ) : (
           <>
